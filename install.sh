@@ -25,6 +25,8 @@ apt-get update -y >/dev/null
 apt-get install -y python3 conntrack iptables iptables-persistent openssl wget >/dev/null
 
 echo -e "${YELLOW}[2/7] ZIVPN binary...${NC}"
+# binary အသုံးပြုနေရင် "Text file busy" ဖြစ်တတ်လို့ အရင် ရပ်ထား
+systemctl stop zvpn-monitor zivpn >/dev/null 2>&1 || true
 wget -q "$ZBIN_URL" -O "$BIN" || { echo -e "${RED}[x] binary download မအောင်မြင်ပါ${NC}"; exit 1; }
 chmod +x "$BIN"
 
