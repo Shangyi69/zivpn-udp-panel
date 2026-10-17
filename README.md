@@ -5,8 +5,11 @@ ZIVPN UDP server အတွက် user management။ Create / Delete / Renew / Lo
 ## Install (VPS, Ubuntu/Debian)
 
 ```bash
-git clone https://github.com/<you>/zvpn.git
-cd zvpn
+cd /root
+rm -rf zivpn-udp-panel
+git clone https://github.com/Shangyi69/zivpn-udp-panel.git
+cd zivpn-udp-panel
+ls
 bash install.sh
 ```
 
