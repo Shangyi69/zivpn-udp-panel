@@ -232,6 +232,7 @@ def cmd_online():
         out.append(f"{user}: {len(ips)} device  ({', '.join(ips)})  blocked sessions={blocked}")
     if online.get("unmapped"):
         out.append(f"မသိရသေးတဲ့ session: {online['unmapped']} (debug ကြည့်ပါ)")
+    out.append(f"auth မှတ်ထားတဲ့ session: {online.get('auth_map', 'n/a')}")
     return "\n".join(out)
 
 
@@ -385,7 +386,8 @@ def monitor_cycle(state):
     tmp = ONLINE + ".tmp"
     os.makedirs(HOME, exist_ok=True)
     with open(tmp, "w") as f:
-        json.dump({"ts": int(now), "sessions": sessions_out, "unmapped": unmapped}, f, indent=2)
+        json.dump({"ts": int(now), "sessions": sessions_out, "unmapped": unmapped,
+                   "auth_map": len(AUTH_MAP)}, f, indent=2)
     os.replace(tmp, ONLINE)
 
 
@@ -430,6 +432,8 @@ class _AuthHandler(BaseHTTPRequestHandler):
             resp = decide_auth(str(req.get("auth", "")), ip)
             if resp.get("ok") and port.isdigit():
                 AUTH_MAP[(ip, int(port))] = {"user": resp["id"], "ts": time.time()}
+            print(f"[auth] addr={addr} ok={resp.get('ok')} user={resp.get('id', '-')}",
+                  file=sys.stderr, flush=True)
         except (ValueError, TypeError, KeyError):
             resp = {"ok": False}
         data = json.dumps(resp).encode()
