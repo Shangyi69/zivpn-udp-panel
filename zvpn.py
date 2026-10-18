@@ -334,10 +334,17 @@ def monitor_cycle(state):
         # log order breaks ties, so the earliest connection is the one that is kept
         state["learned"].setdefault(key, {"user": user, "first": now + i * 1e-3})
 
+    for key, info in list(AUTH_MAP.items()):
+        if info["user"] in db["users"]:
+            state["learned"].setdefault(key, {"user": info["user"], "first": info["ts"]})
     alive = parse_conntrack(read_conntrack())
     for key in list(state["learned"]):
         if key not in alive:
             del state["learned"][key]
+    now_ts = time.time()
+    for key in list(AUTH_MAP):
+        if key not in alive and now_ts - AUTH_MAP[key]["ts"] > 600:
+            del AUTH_MAP[key]
 
     # group live sessions by user
     per_user = {}
@@ -383,6 +390,11 @@ def monitor_cycle(state):
 
 
 # ---------------- http auth endpoint (zivpn calls this on every new connection) ----------------
+# (ip, port) -> {"user": name, "ts": time}. Filled by the auth endpoint, which sees
+# the client's exact address and the username on every successful login.
+AUTH_MAP = {}
+
+
 def _ips_for_user(user, exclude_ip):
     try:
         with open(ONLINE) as f:
@@ -413,9 +425,12 @@ class _AuthHandler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length", "0") or 0)
             req = json.loads(self.rfile.read(n) or b"{}")
-            ip = str(req.get("addr", "")).rsplit(":", 1)[0]
+            addr = str(req.get("addr", ""))
+            ip, _, port = addr.rpartition(":")
             resp = decide_auth(str(req.get("auth", "")), ip)
-        except (ValueError, TypeError):
+            if resp.get("ok") and port.isdigit():
+                AUTH_MAP[(ip, int(port))] = {"user": resp["id"], "ts": time.time()}
+        except (ValueError, TypeError, KeyError):
             resp = {"ok": False}
         data = json.dumps(resp).encode()
         self.send_response(200)
