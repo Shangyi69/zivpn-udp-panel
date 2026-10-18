@@ -341,6 +341,14 @@ def monitor_cycle(state):
         if info["user"] in db["users"]:
             state["learned"].setdefault(key, {"user": info["user"], "first": info["ts"]})
     alive = parse_conntrack(read_conntrack())
+    for key in alive:
+        if key not in state["learned"] and key[0] in AUTH_IP:
+            info = AUTH_IP[key[0]]
+            if info["user"] in db["users"] and now - info["ts"] < 900:
+                state["learned"][key] = {"user": info["user"], "first": info["ts"]}
+    for ip in list(AUTH_IP):
+        if not any(k[0] == ip for k in alive) and now - AUTH_IP[ip]["ts"] > 600:
+            del AUTH_IP[ip]
     for key in list(state["learned"]):
         if key not in alive:
             del state["learned"][key]
@@ -399,6 +407,9 @@ def monitor_cycle(state):
 # (ip, port) -> {"user": name, "ts": time}. Filled by the auth endpoint, which sees
 # the client's exact address and the username on every successful login.
 AUTH_MAP = {}
+# client ip -> {"user", "ts"}. One client can open several UDP ports (port hopping),
+# so a successful login for an ip also covers its other flows.
+AUTH_IP = {}
 
 
 def _ips_for_user(user, exclude_ip):
@@ -436,6 +447,7 @@ class _AuthHandler(BaseHTTPRequestHandler):
             resp = decide_auth(str(req.get("auth", "")), ip)
             if resp.get("ok") and port.isdigit():
                 AUTH_MAP[(ip, int(port))] = {"user": resp["id"], "ts": time.time()}
+                AUTH_IP[ip] = {"user": resp["id"], "ts": time.time()}
             print(f"[auth] addr={addr} ok={resp.get('ok')} user={resp.get('id', '-')}",
                   file=sys.stderr, flush=True)
         except (ValueError, TypeError, KeyError):
