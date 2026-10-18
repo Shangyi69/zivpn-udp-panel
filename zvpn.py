@@ -14,7 +14,8 @@
   zvpn sync                         rewrite zivpn passwords from users (restart if changed)
   zvpn monitor                      daemon: expiry sync, online tracking, device limit
 """
-import json, os, re, secrets, shlex, shutil, subprocess, sys, time
+import json, os, re, secrets, shlex, shutil, subprocess, sys, threading, time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import date, timedelta
 
 HOME = os.environ.get("ZVPN_HOME", "/etc/zivpn-mu")
@@ -29,6 +30,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{2,32}$")
 ADDR_RE = re.compile(r"(\d{1,3}(?:\.\d{1,3}){3}):(\d{1,5})")
 CT_RE = re.compile(r"src=(\S+) dst=(\S+) sport=(\d+) dport=(\d+)")
 RULE_COMMENT = "zvpn-mu"
+AUTH_PORT = int(os.environ.get("ZVPN_AUTH_PORT", "9999"))
+AUTH_URL = f"http://127.0.0.1:{AUTH_PORT}/auth"
 
 
 def run(cmd):
@@ -76,20 +79,16 @@ def restart_service():
 
 
 def sync_config(db=None):
-    """Write active users' passwords into zivpn auth.config. Restart only on change."""
-    db = db or load_db()
+    """Point zivpn at the local auth endpoint (http mode). Restart only on change."""
     if not os.path.exists(CFG):
         return False
-    passwords = sorted({u["password"] for u in db["users"].values() if is_active(u)})
-    if not passwords:
-        passwords = [db["placeholder"]]          # zivpn needs a non-empty list
     with open(CFG) as f:
         cfg = json.load(f)
     auth = cfg.setdefault("auth", {})
-    if auth.get("mode") == "passwords" and auth.get("config") == passwords:
+    want = {"mode": "http", "http": {"url": AUTH_URL}}
+    if auth.get("mode") == "http" and auth.get("http") == want["http"]:
         return False
-    auth["mode"] = "passwords"
-    auth["config"] = passwords
+    cfg["auth"] = want
     shutil.copy2(CFG, CFG + ".bak")
     tmp = CFG + ".tmp"
     with open(tmp, "w") as f:
@@ -262,9 +261,11 @@ def pw_in_line(pw, line):
     return re.search(r"(?<![\w.\-])" + re.escape(pw) + r"(?![\w.\-])", line) is not None
 
 
-def parse_connect_lines(lines, pw_to_user):
-    """{(ip, port): user} for 'connected' log lines that contain a known password."""
+def parse_connect_lines(lines, pw_to_user, names=()):
+    """{(ip, port): user} from 'client connected' log lines.
+    Uses the id field (username from http auth); falls back to a known password in the line."""
     out = {}
+    names = set(names)
     for line in lines:
         low = line.lower()
         if "connect" not in low or "disconnect" in low:
@@ -272,9 +273,14 @@ def parse_connect_lines(lines, pw_to_user):
         m = ADDR_RE.search(line)
         if not m:
             continue
+        key = (m.group(1), int(m.group(2)))
+        idm = re.search(r'"id":\s*"([^"]+)"', line)
+        if idm and idm.group(1) in names:
+            out[key] = idm.group(1)
+            continue
         for pw, user in pw_to_user.items():
             if pw_in_line(pw, line):
-                out[(m.group(1), int(m.group(2)))] = user
+                out[key] = user
                 break
     return out
 
@@ -324,7 +330,7 @@ def monitor_cycle(state):
     pw_to_user = {u["password"]: n for n, u in db["users"].items()}
 
     # learn ip:port -> user from connect logs (kept while the flow is alive)
-    for i, (key, user) in enumerate(parse_connect_lines(read_log_tail(), pw_to_user).items()):
+    for i, (key, user) in enumerate(parse_connect_lines(read_log_tail(), pw_to_user, db["users"].keys()).items()):
         # log order breaks ties, so the earliest connection is the one that is kept
         state["learned"].setdefault(key, {"user": user, "first": now + i * 1e-3})
 
@@ -376,6 +382,55 @@ def monitor_cycle(state):
     os.replace(tmp, ONLINE)
 
 
+# ---------------- http auth endpoint (zivpn calls this on every new connection) ----------------
+def _ips_for_user(user, exclude_ip):
+    try:
+        with open(ONLINE) as f:
+            sess = json.load(f).get("sessions", [])
+    except (OSError, ValueError):
+        return set()
+    return {s["ip"] for s in sess if s["user"] == user and s["ip"] != exclude_ip and not s.get("blocked")}
+
+
+def decide_auth(password, addr_ip):
+    """Return the zivpn auth response dict for a password + client ip."""
+    db = load_db()
+    for name, u in db["users"].items():
+        if u["password"] == password:
+            if not is_active(u):
+                return {"ok": False}
+            if len(_ips_for_user(name, addr_ip)) >= int(u.get("limit", 1)):
+                return {"ok": False}
+            return {"ok": True, "id": name}
+    return {"ok": False}
+
+
+class _AuthHandler(BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass
+
+    def do_POST(self):
+        try:
+            n = int(self.headers.get("Content-Length", "0") or 0)
+            req = json.loads(self.rfile.read(n) or b"{}")
+            ip = str(req.get("addr", "")).rsplit(":", 1)[0]
+            resp = decide_auth(str(req.get("auth", "")), ip)
+        except (ValueError, TypeError):
+            resp = {"ok": False}
+        data = json.dumps(resp).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def start_auth_server():
+    srv = ThreadingHTTPServer(("127.0.0.1", AUTH_PORT), _AuthHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
 def clear_stale_rules():
     """Remove DROP rules left by a previous monitor run (state is in memory only)."""
     r = run(["iptables", "-S", "INPUT"])
@@ -389,6 +444,7 @@ def clear_stale_rules():
 
 def cmd_monitor():
     clear_stale_rules()
+    start_auth_server()
     state = {"learned": {}, "blocked": set()}
     while True:
         try:
