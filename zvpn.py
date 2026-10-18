@@ -225,13 +225,15 @@ def cmd_online():
     for s in online["sessions"]:
         by_user.setdefault(s["user"], []).append(s)
     if not by_user:
-        out.append("online user မရှိပါ")
+        out.append("online client မရှိပါ")
+    unknown = by_user.pop("?", [])
     for user, sess in sorted(by_user.items()):
         ips = sorted({s["ip"] for s in sess})
         blocked = sum(1 for s in sess if s["blocked"])
         out.append(f"{user}: {len(ips)} device  ({', '.join(ips)})  blocked sessions={blocked}")
-    if online.get("unmapped"):
-        out.append(f"မသိရသေးတဲ့ session: {online['unmapped']} (debug ကြည့်ပါ)")
+    if unknown:
+        ips = sorted({s["ip"] for s in unknown})
+        out.append(f"username မသိသေးတဲ့ client: {len(ips)} ({', '.join(ips)})")
     out.append(f"auth မှတ်ထားတဲ့ session: {online.get('auth_map', 'n/a')}")
     return "\n".join(out)
 
@@ -349,17 +351,19 @@ def monitor_cycle(state):
 
     # group live sessions by user
     per_user = {}
+    sessions_out = []
     unmapped = 0
     for key in alive:
         info = state["learned"].get(key)
         if info is None:
             unmapped += 1
+            sessions_out.append({"user": "?", "ip": key[0], "port": key[1],
+                                 "since": int(now), "blocked": False})
             continue
         per_user.setdefault(info["user"], []).append((key, info["first"]))
 
     # decide which sessions must be blocked
     want_block = set()
-    sessions_out = []
     for user, sess in per_user.items():
         u = db["users"].get(user)
         if u is None or not is_active(u):
