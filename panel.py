@@ -85,6 +85,26 @@ td,th{border-bottom:1px solid #2a2d35;padding:6px;text-align:left}
 .row{display:flex;gap:6px;flex-wrap:wrap}
 .row>*{flex:1 1 140px}
 form.inline{display:inline}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:6px}
+.stats{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:10px}
+.stat{background:#1a1d24;border-radius:10px;padding:10px;text-align:center}
+.stat .n{font-size:24px;font-weight:bold}
+.card{border-bottom:1px solid #2a2d35;padding:10px 0}
+.card:last-child{border-bottom:0}
+.card .head{justify-content:space-between;align-items:center}
+.name{font-size:16px}
+.pw{color:#888;font-size:12px;margin-left:6px}
+.meta{color:#999;font-size:13px;margin:4px 0}
+.ips{color:#8ab4ff;font-size:13px;word-break:break-all}
+.badge{display:inline-block;border-radius:12px;padding:2px 8px;font-size:12px;margin-left:4px}
+.badge.on{background:#16351f;color:#5fd38d}
+.badge.off{background:#2a2d35;color:#888}
+.badge.ok{background:#16351f;color:#5fd38d}
+.badge.warn{background:#3a3117;color:#f3c969}
+.badge.bad{background:#3a1717;color:#ff7b7b}
+.n.on{color:#5fd38d}.n.ok{color:#5fd38d}
+.link{color:#8ab4ff}
+.btns{margin-top:6px}
 """
 
 
@@ -107,47 +127,93 @@ def login_page(msg=""):
 </form></div>""")
 
 
+def _online_index():
+    """{user: [ip, ...]} and [ip, ...] for clients whose username is not known yet."""
+    online = zvpn.read_online()
+    by_user, unknown = {}, set()
+    for s in online.get("sessions", []):
+        if s["user"] == "?":
+            unknown.add(s["ip"])
+        else:
+            by_user.setdefault(s["user"], set()).add(s["ip"])
+    return online, {k: sorted(v) for k, v in by_user.items()}, sorted(unknown)
+
+
 def dashboard(sess, flash):
     db = zvpn.load_db()
-    online = zvpn.read_online()
-    counts = {}
-    for s in online.get("sessions", []):
-        counts.setdefault(s["user"], set()).add(s["ip"])
-    rows = []
+    online, by_user, unknown = _online_index()
+    csrf = sess["csrf"]
+    age = int(time.time() - online.get("ts", 0)) if online.get("ts") else None
+
+    total = len(db["users"])
+    active = sum(1 for u in db["users"].values() if zvpn.status_of(u) == "active")
+    online_users = sum(1 for n in db["users"] if by_user.get(n))
+    online_clients = sum(len(v) for v in by_user.values()) + len(unknown)
+
+    cards = []
     for name, u in sorted(db["users"].items()):
         st = zvpn.status_of(u)
-        cls = "ok" if st == "active" else "bad"
-        n = len(counts.get(name, ()))
-        csrf = sess["csrf"]
-        rows.append(f"""
-<tr><td>{html.escape(name)}</td><td>{html.escape(u['password'])}</td>
-<td>{u['expire']}</td><td>{u['limit']}</td><td>{n}</td>
-<td class="{cls}">{st}</td>
-<td>
- <form class="inline" method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
- <input type="hidden" name="action" value="{'unlock' if st=='locked' else 'lock'}">
- <input type="hidden" name="user" value="{html.escape(name)}">
- <button class="gray">{'Unlock' if st=='locked' else 'Lock'}</button></form>
- <form class="inline" method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
- <input type="hidden" name="action" value="delete"><input type="hidden" name="user" value="{html.escape(name)}">
- <button class="red">Delete</button></form>
-</td></tr>""")
-    table = "".join(rows) or '<tr><td colspan="7">user မရှိသေးပါ</td></tr>'
+        ips = by_user.get(name, [])
+        st_cls = {"active": "ok", "locked": "warn", "expired": "bad"}[st]
+        on_html = (f'<span class="badge on">ONLINE {len(ips)}</span>' if ips
+                   else '<span class="badge off">offline</span>')
+        ip_html = (f'<div class="ips">{html.escape(", ".join(ips))}</div>' if ips else "")
+        toggle = "unlock" if st == "locked" else "lock"
+        cards.append(f"""
+<div class="card">
+ <div class="row head">
+  <div><b class="name">{html.escape(name)}</b> <span class="pw">pw: {html.escape(u['password'])}</span></div>
+  <div>{on_html} <span class="badge {st_cls}">{st}</span></div>
+ </div>
+ <div class="meta">expire {u['expire']} · limit {u['limit']} device</div>
+ {ip_html}
+ <div class="btns">
+  <form class="inline" method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
+   <input type="hidden" name="action" value="{toggle}"><input type="hidden" name="user" value="{html.escape(name)}">
+   <button class="gray">{'Unlock' if st == 'locked' else 'Lock'}</button></form>
+  <form class="inline" method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
+   <input type="hidden" name="action" value="delete"><input type="hidden" name="user" value="{html.escape(name)}">
+   <button class="red">Delete</button></form>
+ </div>
+</div>""")
+    user_html = "".join(cards) or '<p class="meta">user မရှိသေးပါ</p>'
+
+    unknown_html = ""
+    if unknown:
+        unknown_html = (f'<div class="box"><h2>Username မသိသေးတဲ့ client</h2>'
+                        f'<p class="meta">{html.escape(", ".join(unknown))}</p>'
+                        f'<p class="meta">Login ဝင်ပြီးမှ username ပေါ်ပါမယ်</p></div>')
+
     m = ""
     if flash:
         cls = "ok" if flash[0] else "err"
         m = f'<div class="msg {cls}">{html.escape(flash[1])}</div>'
-    csrf = sess["csrf"]
-    online_txt = "monitor မ run သေး" if online.get("ts", 0) == 0 else (
-        f"unmapped session: {online.get('unmapped', 0)}")
+    if age is None:
+        mon = '<span class="bad">monitor မ run သေး</span>'
+    elif age > 30:
+        mon = f'<span class="bad">monitor data {age}s အရင် (နောက်ကျနေ)</span>'
+    else:
+        mon = f'<span class="ok">live · {age}s အရင်</span>'
+
     return page("ZIVPN Panel", f"""
-<div class="row"><h2>ZIVPN Panel</h2>
-<div style="text-align:right"><a href="/logout" style="color:#8ab4ff">Logout</a></div></div>
+<meta http-equiv="refresh" content="10">
+<div class="row head"><h2>ZIVPN Panel</h2>
+<a href="/logout" class="link">Logout</a></div>
+<div class="stats">
+ <div class="stat"><div class="n">{total}</div><div>users</div></div>
+ <div class="stat"><div class="n ok">{active}</div><div>active</div></div>
+ <div class="stat"><div class="n on">{online_users}</div><div>online user</div></div>
+ <div class="stat"><div class="n">{online_clients}</div><div>online device</div></div>
+</div>
+<p class="meta">{mon}</p>
 {m}
+{unknown_html}
+<div class="box"><h2>User များ</h2>{user_html}</div>
+
 <div class="box"><h2>User အသစ်</h2>
 <form method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="action" value="create">
-<div class="row">
+<div class="grid">
 <input name="user" placeholder="username" required>
 <input name="password" placeholder="ZIVPN password (4+)" required>
 <input name="days" type="number" value="30" min="1" placeholder="ရက်">
@@ -155,23 +221,18 @@ def dashboard(sess, flash):
 </div>
 <button style="margin-top:6px">Create</button></form></div>
 
-<div class="box"><h2>User များ</h2>
-<table><tr><th>User</th><th>Password</th><th>Expire</th><th>Limit</th><th>Online</th><th>Status</th><th>Action</th></tr>
-{table}</table>
-<p style="font-size:12px;color:#888">{online_txt}</p></div>
-
 <div class="box"><h2>သက်တမ်းတိုး / Limit / Password</h2>
 <form method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="action" value="renew">
-<div class="row"><input name="user" placeholder="username" required>
+<div class="grid"><input name="user" placeholder="username" required>
 <input name="days" type="number" value="30" min="1"><button>Renew</button></div></form>
 <form method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="action" value="setlimit">
-<div class="row"><input name="user" placeholder="username" required>
+<div class="grid"><input name="user" placeholder="username" required>
 <input name="limit" type="number" min="1" placeholder="limit"><button>Set limit</button></div></form>
 <form method="post" action="/action"><input type="hidden" name="csrf" value="{csrf}">
 <input type="hidden" name="action" value="setpass">
-<div class="row"><input name="user" placeholder="username" required>
+<div class="grid"><input name="user" placeholder="username" required>
 <input name="password" placeholder="password အသစ်"><button>Set password</button></div></form>
 </div>""")
 
